@@ -6,6 +6,8 @@ from datetime import datetime
 import time
 import requests
 from bs4 import BeautifulSoup
+import smtplib
+from email.mime.text import MIMEText
 
 # Global untuk hasil
 results = []
@@ -48,8 +50,6 @@ def get_berita_investing(ticker_nama, max_berita=5):
     """
     Ambil berita terbaru dari Investing.com Indonesia berdasarkan nama saham.
     """
-    import requests
-    from bs4 import BeautifulSoup
 
     query = ticker_nama.replace('.JK', '').replace(' ', '%20')
     url = f"https://id.investing.com/search/?q={query}&tab=news"
@@ -340,6 +340,31 @@ def detect_swing_signals(data):
     data['SellSignal'] = [None]*20 + sell_signals
     return data
 
+def detect_ema_bounce(data):
+    data['EMA20'] = data['Close'].ewm(span=20).mean()
+    data['EMA50'] = data['Close'].ewm(span=50).mean()
+
+    bounce_signals = []
+    for i in range(1, len(data)):
+        close = data['Close'].iloc[i]
+        open_ = data['Open'].iloc[i]
+        high = data['High'].iloc[i]
+        low = data['Low'].iloc[i]
+
+        is_bullish_candle = close > open_ and (close - open_) > 0.5 * (high - low)
+        near_ema = (
+            abs(close - data['EMA20'].iloc[i]) / close < 0.01 or
+            abs(close - data['EMA50'].iloc[i]) / close < 0.01
+        )
+
+        if is_bullish_candle and near_ema:
+            bounce_signals.append(data.index[i])
+        else:
+            bounce_signals.append(None)
+
+    data['EMABounce'] = [None] + bounce_signals  # Pad the first row
+    return data
+
 def rekomendasi_tp_sl(entry_price, atr, data=None, tp_atr=2, sl_atr=1, tp_pct=0.05, sl_pct=0.03):
     """
     Rekomendasi TP/SL berbasis ATR, persentase, dan support level (jika data diberikan).
@@ -399,6 +424,42 @@ def trailing_exit_conditions(data):
 
     return close_below_ma5 or rsi_down or macd_hist_down
 
+def detect_fibonacci_pullback(data, lookback=30):
+    signals = []
+    for i in range(lookback, len(data)):
+        swing_high = data['High'].iloc[i-lookback:i].max()
+        swing_low = data['Low'].iloc[i-lookback:i].min()
+        fib_382 = swing_high - 0.382 * (swing_high - swing_low)
+        fib_618 = swing_high - 0.618 * (swing_high - swing_low)
+
+        close = data['Close'].iloc[i]
+        open_ = data['Open'].iloc[i]
+        is_bullish = close > open_ and (close - open_) > 0.5 * (data['High'].iloc[i] - data['Low'].iloc[i])
+
+        if fib_618 < close < fib_382 and is_bullish:
+            signals.append(data.index[i])
+        else:
+            signals.append(None)
+    data['FiboPullback'] = [None] * lookback + signals
+    return data
+
+def detect_swing_low_reversal(data):
+    swing_lows = []
+    for i in range(2, len(data) - 2):
+        if data['Low'].iloc[i] < data['Low'].iloc[i-2] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i-1] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i+1] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i+2]:
+            close = data['Close'].iloc[i+1]
+            open_ = data['Open'].iloc[i+1]
+            is_bullish = close > open_ and (close - open_) > 0.5 * (data['High'].iloc[i+1] - data['Low'].iloc[i+1])
+            swing_lows.append(data.index[i+1] if is_bullish else None)
+        else:
+            swing_lows.append(None)
+    data['SwingLowReversal'] = [None]*2 + swing_lows + [None]*2
+    return data
+
+
 # UI
 st.title("Sinyal Trading Semi-Otomatis IDX Full Scan")
 
@@ -445,116 +506,123 @@ if results:
     df = pd.DataFrame(results).drop(columns=['Data'])
     st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
     st.dataframe(df)
-    st.download_button(
-        "Download hasil ke CSV", 
-        data=df.to_csv(index=False), 
-        file_name="sinyal_buy.csv", 
-        mime='text/csv',
-        key="download_no_tier"  # <-- Add unique key here
+
+    # Pilih ticker untuk analisis detail
+    selected_ticker = st.selectbox(
+        "Pilih ticker untuk analisis detail:",
+        df['Ticker'].tolist()
     )
-# ...existing code...
 
-# Detail saham & visualisasi
-if results:
-    selected_ticker = st.selectbox("Pilih saham untuk lihat grafik:", [r['Ticker'] for r in results])
-    selected_data = next(r['Data'] for r in results if r['Ticker'] == selected_ticker)
-    selected_resistance = next(r['Resistance'] for r in results if r['Ticker'] == selected_ticker)
-    selected_sma50 = next(r['SMA50'] for r in results if r['Ticker'] == selected_ticker)
+    # Ambil data untuk ticker terpilih
+    selected_row = next((item for item in results if item['Ticker'] == selected_ticker), None)
+    if selected_row:
+        selected_data = selected_row['Data']
+        selected_resistance = selected_row['Resistance']
 
-    # Grafik Harga dengan Sinyal Swing (harian)
-    selected_data = detect_swing_signals(selected_data)
-    buy_dates = selected_data[selected_data['BuySignal'].notna()]
-    sell_dates = selected_data[selected_data['SellSignal'].notna()]
+        # Grafik Harga dengan Sinyal Swing (harian)
+        selected_data = detect_swing_signals(selected_data)
+        selected_data = detect_ema_bounce(selected_data)
+        bounce_dates = selected_data[selected_data['EMABounce'].notna()]
+        selected_data = detect_fibonacci_pullback(selected_data)
+        fibo_pullback_dates = selected_data[selected_data['FiboPullback'].notna()]
+        selected_data = detect_swing_low_reversal(selected_data)
+        swlr_dates = selected_data[selected_data['SwingLowReversal'].notna()]
 
-    fig, ax = plt.subplots(figsize=(10,5))
-    ax.plot(selected_data.index, selected_data['Close'], label='Close', color='blue')
-    ax.axhline(selected_resistance, color='red', linestyle='--', label='Resistance 50 hari')
-    ax.plot(selected_data.index, selected_data['SMA50'], label='SMA 50', color='orange')
-    ax.scatter(buy_dates.index, selected_data.loc[buy_dates.index, 'Close'], label='Buy', color='green', marker='^', s=100)
-    ax.scatter(sell_dates.index, selected_data.loc[sell_dates.index, 'Close'], label='Sell', color='red', marker='v', s=100)
-    ax.set_title(f"Grafik Harga & Sinyal Swing {selected_ticker}")
-    ax.legend()
-    st.pyplot(fig)
+        buy_dates = selected_data[selected_data['BuySignal'].notna()]
+        sell_dates = selected_data[selected_data['SellSignal'].notna()]
 
-    # --- Tambahan: Grafik Timeframe Lebih Kecil (1 Jam) ---
-    st.markdown("### Grafik Intraday (1 Jam) untuk Entry Presisi")
-    intraday_1h = yf.download(selected_ticker, period='5d', interval='1h')
-    if not intraday_1h.empty:
-        fig_1h, ax_1h = plt.subplots(figsize=(10,3))
-        ax_1h.plot(intraday_1h.index, intraday_1h['Close'], label='Close 1H', color='blue')
-        ax_1h.set_title(f"{selected_ticker} - Close 1 Jam (5 Hari Terakhir)")
-        ax_1h.legend()
-        st.pyplot(fig_1h)
-    else:
-        st.info("Data intraday 1 jam tidak tersedia untuk saham ini.")
+        fig, ax = plt.subplots(figsize=(10,5))
+        ax.plot(selected_data.index, selected_data['Close'], label='Close', color='blue')
+        ax.axhline(selected_resistance, color='red', linestyle='--', label='Resistance 50 hari')
+        ax.plot(selected_data.index, selected_data['SMA50'], label='SMA 50', color='orange')
+        ax.scatter(buy_dates.index, selected_data.loc[buy_dates.index, 'Close'], label='Buy', color='green', marker='^', s=100)
+        ax.scatter(sell_dates.index, selected_data.loc[sell_dates.index, 'Close'], label='Sell', color='red', marker='v', s=100)
+        ax.scatter(bounce_dates.index, selected_data.loc[bounce_dates.index, 'Close'], label='EMA Bounce', color='blue', marker='o', s=80)
+        ax.scatter(fibo_pullback_dates.index, selected_data.loc[fibo_pullback_dates.index, 'Close'], label='Fibo Pullback', color='purple', marker='s', s=80)
+        ax.scatter(swlr_dates.index, selected_data.loc[swlr_dates.index, 'Close'], label='Swing Low Reversal', color='brown', marker='P', s=100)  # Tambahkan ini
+        ax.set_title(f"Grafik Harga & Sinyal Swing {selected_ticker}")
+        ax.legend()
+        st.pyplot(fig)
 
-    # --- Grafik Intraday 30 Menit ---
-    st.markdown("### Grafik Intraday (30 Menit) untuk Entry Presisi")
-    intraday_30m = yf.download(selected_ticker, period='5d', interval='30m')
-    if not intraday_30m.empty:
-        fig_30m, ax_30m = plt.subplots(figsize=(10,3))
-        ax_30m.plot(intraday_30m.index, intraday_30m['Close'], label='Close 30m', color='green')
-        ax_30m.set_title(f"{selected_ticker} - Close 30 Menit (5 Hari Terakhir)")
-        ax_30m.legend()
-        st.pyplot(fig_30m)
-    else:
-        st.info("Data intraday 30 menit tidak tersedia untuk saham ini.")
-
-    # --- END Tambahan ---
-
-    # Rekomendasi TP/SL otomatis
-    selected_data = detect_swing_signals(selected_data)
-    last_atr = selected_data['ATR'].iloc[-1]
-    entry = selected_data['Close'].iloc[-1]
-    tp_sl = rekomendasi_tp_sl(entry, last_atr, data=selected_data)
-    st.markdown("### Rekomendasi Take Profit & Stop Loss (Otomatis, ATR & Support)")
-    st.write(pd.DataFrame([tp_sl]))
-
-    # Risk:Reward Ratio
-    rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
-    rr_pct = (tp_sl["TP (%)"] - entry) / (entry - tp_sl["SL (%)"]) if (entry - tp_sl["SL (%)"]) != 0 else None
-    st.markdown("**Risk:Reward Ratio**")
-    st.write(f"ATR-based: {rr_atr:.2f} | Persentase: {rr_pct:.2f}")
-
-    # Grafik RSI
-    fig2, ax2 = plt.subplots(figsize=(10,2))
-    ax2.plot(selected_data.index, selected_data['RSI'], label='RSI', color='purple')
-    ax2.axhline(70, color='red', linestyle='--', linewidth=1)
-    ax2.axhline(30, color='green', linestyle='--', linewidth=1)
-    ax2.set_title(f"RSI {selected_ticker}")
-    st.pyplot(fig2)
-
-    # Grafik MACD
-    fig3, ax3 = plt.subplots(figsize=(10,2))
-    ax3.plot(selected_data.index, selected_data['MACD'], label='MACD', color='blue')
-    ax3.plot(selected_data.index, selected_data['Signal'], label='Signal', color='orange')
-    ax3.axhline(0, color='gray', linestyle='--', linewidth=1)
-    ax3.set_title(f"MACD {selected_ticker}")
-    ax3.legend()
-    st.pyplot(fig3)
-
-    # Trailing Stop Info
-    last_atr = selected_data['ATR'].iloc[-1]
-    trailing_signal = trailing_stop_exit(selected_data['Close'], last_atr)
-    if trailing_signal.iloc[-1]:
-        st.warning("⚠️ Trailing Stop Exit: Harga sudah turun >3% dari puncak terakhir!")
-    else:
-        st.success("Trailing Stop belum kena.")
-
-    # --- Info GAP Open Hari Ini ---
-    if len(selected_data) > 1:
-        today_open = selected_data['Open'].iloc[-1]
-        prev_close = selected_data['Close'].iloc[-2]
-        gap = today_open - prev_close
-        gap_pct = (gap / prev_close) * 100 if prev_close != 0 else 0
-        if abs(gap_pct) > 0.5:  # threshold 0.5% untuk dianggap signifikan
-            st.warning(f"GAP open hari ini: {gap:+.2f} ({gap_pct:+.2f}%)")
+        # --- Tambahan: Grafik Timeframe Lebih Kecil (1 Jam) ---
+        st.markdown("### Grafik Intraday (1 Jam) untuk Entry Presisi")
+        intraday_1h = yf.download(selected_ticker, period='5d', interval='1h')
+        if not intraday_1h.empty:
+            fig_1h, ax_1h = plt.subplots(figsize=(10,3))
+            ax_1h.plot(intraday_1h.index, intraday_1h['Close'], label='Close 1H', color='blue')
+            ax_1h.set_title(f"{selected_ticker} - Close 1 Jam (5 Hari Terakhir)")
+            ax_1h.legend()
+            st.pyplot(fig_1h)
         else:
-            st.info(f"Tidak ada GAP open signifikan hari ini. (Gap: {gap:+.2f}, {gap_pct:+.2f}%)")
+            st.info("Data intraday 1 jam tidak tersedia untuk saham ini.")
+
+        # --- Grafik Intraday 30 Menit ---
+        st.markdown("### Grafik Intraday (30 Menit) untuk Entry Presisi")
+        intraday_30m = yf.download(selected_ticker, period='5d', interval='30m')
+        if not intraday_30m.empty:
+            fig_30m, ax_30m = plt.subplots(figsize=(10,3))
+            ax_30m.plot(intraday_30m.index, intraday_30m['Close'], label='Close 30m', color='green')
+            ax_30m.set_title(f"{selected_ticker} - Close 30 Menit (5 Hari Terakhir)")
+            ax_30m.legend()
+            st.pyplot(fig_30m)
+        else:
+            st.info("Data intraday 30 menit tidak tersedia untuk saham ini.")
+
+        # --- END Tambahan ---
+
+        # Rekomendasi TP/SL otomatis
+        selected_data = detect_swing_signals(selected_data)
+        last_atr = selected_data['ATR'].iloc[-1]
+        entry = selected_data['Close'].iloc[-1]
+        tp_sl = rekomendasi_tp_sl(entry, last_atr, data=selected_data)
+        st.markdown("### Rekomendasi Take Profit & Stop Loss (Otomatis, ATR & Support)")
+        st.write(pd.DataFrame([tp_sl]))
+
+        # Risk:Reward Ratio
+        rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
+        rr_pct = (tp_sl["TP (%)"] - entry) / (entry - tp_sl["SL (%)"]) if (entry - tp_sl["SL (%)"]) != 0 else None
+        st.markdown("**Risk:Reward Ratio**")
+        st.write(f"ATR-based: {rr_atr:.2f} | Persentase: {rr_pct:.2f}")
+
+        # Grafik RSI
+        fig2, ax2 = plt.subplots(figsize=(10,2))
+        ax2.plot(selected_data.index, selected_data['RSI'], label='RSI', color='purple')
+        ax2.axhline(70, color='red', linestyle='--', linewidth=1)
+        ax2.axhline(30, color='green', linestyle='--', linewidth=1)
+        ax2.set_title(f"RSI {selected_ticker}")
+        st.pyplot(fig2)
+
+        # Grafik MACD
+        fig3, ax3 = plt.subplots(figsize=(10,2))
+        ax3.plot(selected_data.index, selected_data['MACD'], label='MACD', color='blue')
+        ax3.plot(selected_data.index, selected_data['Signal'], label='Signal', color='orange')
+        ax3.axhline(0, color='gray', linestyle='--', linewidth=1)
+        ax3.set_title(f"MACD {selected_ticker}")
+        ax3.legend()
+        st.pyplot(fig3)
+
+        # Trailing Stop Info
+        last_atr = selected_data['ATR'].iloc[-1]
+        trailing_signal = trailing_stop_exit(selected_data['Close'], last_atr)
+        if trailing_signal.iloc[-1]:
+            st.warning("⚠️ Trailing Stop Exit: Harga sudah turun >3% dari puncak terakhir!")
+        else:
+            st.success("Trailing Stop belum kena.")
+
+        # --- Info GAP Open Hari Ini ---
+        if len(selected_data) > 1:
+            today_open = selected_data['Open'].iloc[-1]
+            prev_close = selected_data['Close'].iloc[-2]
+            gap = today_open - prev_close
+            gap_pct = (gap / prev_close) * 100 if prev_close != 0 else 0
+            if abs(gap_pct) > 0.5:  # threshold 0.5% untuk dianggap signifikan
+                st.warning(f"GAP open hari ini: {gap:+.2f} ({gap_pct:+.2f}%)")
+            else:
+                st.info(f"Tidak ada GAP open signifikan hari ini. (Gap: {gap:+.2f}, {gap_pct:+.2f}%)")
+        else:
+            st.info("Data tidak cukup untuk menghitung GAP open hari ini.")
     else:
-        st.info("Data tidak cukup untuk menghitung GAP open hari ini.")
-else:
-    st.info("Tidak ada sinyal BUY hari ini di batch ini.")
+        st.info("Tidak ada sinyal BUY hari ini di batch ini.")
 
 def assign_detailed_tier_v2(row):
     conds = {
@@ -616,17 +684,35 @@ def assign_detailed_tier_v2(row):
 # Setelah membuat df dari results, tambahkan kolom Tier:
 if results:
     df = pd.DataFrame(results).drop(columns=['Data'])
+
+    # Hitung RR_ATR untuk setiap saham
+    rr_atr_list = []
+    for _, row in df.iterrows():
+        entry = row['Close']
+        # Ambil ATR terakhir dari data asli (results)
+        data_row = next((item for item in results if item['Ticker'] == row['Ticker']), None)
+        if data_row:
+            data = data_row['Data']
+            last_atr = data['ATR'].iloc[-1]
+            tp_sl = rekomendasi_tp_sl(entry, last_atr, data=data)
+            rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
+        else:
+            rr_atr = None
+        rr_atr_list.append(rr_atr)
+
+    df['RR_ATR'] = rr_atr_list
+    df['RR_Rank'] = df['RR_ATR'].rank(ascending=False, method='min')
     df['Tier'] = df.apply(assign_detailed_tier_v2, axis=1)
+
     st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
-    st.dataframe(df)
+    st.dataframe(df.sort_values('RR_Rank'))  # Tampilkan ranking terbaik di atas
     st.download_button(
         "Download hasil ke CSV",
-        data=df.to_csv(index=False),
+        data=df.sort_values('RR_Rank').to_csv(index=False),
         file_name="sinyal_buy.csv",
         mime='text/csv',
-        key="download_with_tier"
+        key="download_with_tier1"
     )
-
     # Trailing TP/Exit Condition
     if trailing_exit_conditions(selected_data):
         st.warning("⚠️ Exit Condition terpenuhi: Close < MA5, RSI/Histogram MACD menurun!")
@@ -650,3 +736,80 @@ if results:
             st.markdown(f"- [{judul}]({link})  \n<sub>{waktu}</sub>", unsafe_allow_html=True)
     else:
         st.info("Belum ada berita terbaru untuk saham ini di Investing.com.")
+
+pullback_tickers = []
+for res in results:
+    data = res['Data']
+    has_fibo = data['FiboPullback'].notna().iloc[-1] if 'FiboPullback' in data.columns else False
+    has_ema = data['EMABounce'].notna().iloc[-1] if 'EMABounce' in data.columns else False
+    has_swlr = data['SwingLowReversal'].notna().iloc[-1] if 'SwingLowReversal' in data.columns else False
+    if has_fibo or has_ema or has_swlr:
+        pullback_tickers.append(res['Ticker'])
+
+df_pullback = df[df['Ticker'].isin(pullback_tickers)]
+
+if not df_pullback.empty:
+    st.subheader("Saham dengan Sinyal Pullback (Fibo/EMA/Swing Low Reversal)")
+    st.dataframe(df_pullback.sort_values('RR_Rank'))
+else:
+    st.info("Tidak ada saham pullback pada batch ini.")
+
+def send_email_alert(subject, body, to_email):
+    from_email = "testsaham7@gmail.com"
+    password = "fngk bziv sqxo lxxv"  # Gunakan App Password Gmail
+    msg = MIMEText(body, "html")
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = to_email
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(from_email, password)
+        server.sendmail(from_email, to_email, msg.as_string())
+
+if results:
+    df = pd.DataFrame(results).drop(columns=['Data'])
+
+    # Hitung RR_ATR untuk setiap saham
+    rr_atr_list = []
+    tp_final_list = []
+    sl_final_list = []
+    for _, row in df.iterrows():
+        entry = row['Close']
+        data_row = next((item for item in results if item['Ticker'] == row['Ticker']), None)
+        if data_row:
+            data = data_row['Data']
+            last_atr = data['ATR'].iloc[-1]
+            tp_sl = rekomendasi_tp_sl(entry, last_atr, data=data)
+            rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
+            tp_final_list.append(tp_sl["TP Final"])
+            sl_final_list.append(tp_sl["SL Final"])
+        else:
+            rr_atr = None
+            tp_final_list.append(None)
+            sl_final_list.append(None)
+        rr_atr_list.append(rr_atr)
+
+    df['RR_ATR'] = rr_atr_list
+    df['TP Final'] = tp_final_list
+    df['SL Final'] = sl_final_list
+    df['RR_Rank'] = df['RR_ATR'].rank(ascending=False, method='min')
+    df['Tier'] = df.apply(assign_detailed_tier_v2, axis=1)
+
+    st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
+    st.dataframe(df.sort_values('RR_Rank'))
+    st.download_button(
+        "Download hasil ke CSV",
+        data=df.sort_values('RR_Rank').to_csv(index=False),
+        file_name="sinyal_buy.csv",
+        mime='text/csv',
+        key="download_with_tier"
+    )
+
+    # --- Kirim Email Otomatis untuk Sinyal A & B ---
+    df_AB = df[df['Tier'].str.contains('A|B')].copy()
+    if not df_AB.empty:
+        body = df_AB.to_html(index=False)
+        send_email_alert("Sinyal A & B Terdeteksi", body, "blackfoper@gmail.com")
+        st.success("Notifikasi email otomatis terkirim ke blackfoper@gmail.com untuk sinyal A & B.")
+
+
