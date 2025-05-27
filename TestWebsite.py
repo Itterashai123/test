@@ -138,17 +138,9 @@ def load_idx_tickers():
             return []
         return df['Ticker'].dropna().unique().tolist()
     except FileNotFoundError:
-        if data.empty:
-            st.write(f"{ticker}: ❌ Data kosong.")
-            return
-        first_date = data.index.min()
-        last_date = data.index.max()
-        day_span = (last_date - first_date).days
-        if day_span < 50:
-            st.write(f"{ticker}: ⚠️ Hanya mencakup {day_span} hari kalender ({len(data)} hari bursa).")
-        else:
-            st.write(f"{ticker}: ✅ {day_span} hari kalender, {len(data)} hari bursa.")
-        
+        st.error("File idx_stocks.csv tidak ditemukan.")
+        return []
+    
 def calculate_adx(data, window=14):
     high = data['High']
     low = data['Low']
