@@ -685,91 +685,7 @@ def assign_detailed_tier_v2(row):
 if results:
     df = pd.DataFrame(results).drop(columns=['Data'])
 
-    # Hitung RR_ATR untuk setiap saham
-    rr_atr_list = []
-    for _, row in df.iterrows():
-        entry = row['Close']
-        # Ambil ATR terakhir dari data asli (results)
-        data_row = next((item for item in results if item['Ticker'] == row['Ticker']), None)
-        if data_row:
-            data = data_row['Data']
-            last_atr = data['ATR'].iloc[-1]
-            tp_sl = rekomendasi_tp_sl(entry, last_atr, data=data)
-            rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
-        else:
-            rr_atr = None
-        rr_atr_list.append(rr_atr)
-
-    df['RR_ATR'] = rr_atr_list
-    df['RR_Rank'] = df['RR_ATR'].rank(ascending=False, method='min')
-    df['Tier'] = df.apply(assign_detailed_tier_v2, axis=1)
-
-    st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
-    st.dataframe(df.sort_values('RR_Rank'))  # Tampilkan ranking terbaik di atas
-    st.download_button(
-        "Download hasil ke CSV",
-        data=df.sort_values('RR_Rank').to_csv(index=False),
-        file_name="sinyal_buy.csv",
-        mime='text/csv',
-        key="download_with_tier1"
-    )
-    # Trailing TP/Exit Condition
-    if trailing_exit_conditions(selected_data):
-        st.warning("⚠️ Exit Condition terpenuhi: Close < MA5, RSI/Histogram MACD menurun!")
-    else:
-        st.success("Belum ada sinyal exit (Trailing TP/Exit Condition).")
-
-    # --- Berita Terkini Saham Ini (Google News/Kontan) ---
-    st.markdown("### Berita Terkini Saham Ini (Kontan.co.id)")
-    berita = get_berita_kontan(selected_ticker.replace('.JK', ''))
-    if berita:
-        for judul, link, waktu in berita:
-            st.markdown(f"- [{judul}]({link})  \n<sub>{waktu}</sub>", unsafe_allow_html=True)
-    else:
-        st.info("Belum ada berita terbaru untuk saham ini.")
-
-    # --- Berita Terkini Investing.com Indonesia ---
-    st.markdown("### Berita Terkini Saham Ini (Investing.com Indonesia)")
-    berita_investing = get_berita_investing(selected_ticker.replace('.JK', ''))
-    if berita_investing:
-        for judul, link, waktu in berita_investing:
-            st.markdown(f"- [{judul}]({link})  \n<sub>{waktu}</sub>", unsafe_allow_html=True)
-    else:
-        st.info("Belum ada berita terbaru untuk saham ini di Investing.com.")
-
-pullback_tickers = []
-for res in results:
-    data = res['Data']
-    has_fibo = data['FiboPullback'].notna().iloc[-1] if 'FiboPullback' in data.columns else False
-    has_ema = data['EMABounce'].notna().iloc[-1] if 'EMABounce' in data.columns else False
-    has_swlr = data['SwingLowReversal'].notna().iloc[-1] if 'SwingLowReversal' in data.columns else False
-    if has_fibo or has_ema or has_swlr:
-        pullback_tickers.append(res['Ticker'])
-
-df_pullback = df[df['Ticker'].isin(pullback_tickers)]
-
-if not df_pullback.empty:
-    st.subheader("Saham dengan Sinyal Pullback (Fibo/EMA/Swing Low Reversal)")
-    st.dataframe(df_pullback.sort_values('RR_Rank'))
-else:
-    st.info("Tidak ada saham pullback pada batch ini.")
-
-def send_email_alert(subject, body, to_email):
-    from_email = "testsaham7@gmail.com"
-    password = "fngk bziv sqxo lxxv"  # Gunakan App Password Gmail
-    msg = MIMEText(body, "html")
-    msg["Subject"] = subject
-    msg["From"] = from_email
-    msg["To"] = to_email
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(from_email, password)
-        server.sendmail(from_email, to_email, msg.as_string())
-
-if results:
-    df = pd.DataFrame(results).drop(columns=['Data'])
-
-    # Hitung RR_ATR untuk setiap saham
+    # Hitung RR_ATR, TP Final, SL Final
     rr_atr_list = []
     tp_final_list = []
     sl_final_list = []
@@ -795,6 +711,14 @@ if results:
     df['RR_Rank'] = df['RR_ATR'].rank(ascending=False, method='min')
     df['Tier'] = df.apply(assign_detailed_tier_v2, axis=1)
 
+    # --- Kirim Email Otomatis untuk Sinyal A & B ---
+    df_AB = df[df['Tier'].str.contains('A|B')].copy()
+    if not df_AB.empty:
+        body = df_AB.to_html(index=False)
+        send_email_alert("Sinyal A & B Terdeteksi", body, "blackfoper@gmail.com")
+        st.success("Notifikasi email otomatis terkirim ke blackfoper@gmail.com untuk sinyal A & B.")
+
+    # --- Tabel utama ---
     st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
     st.dataframe(df.sort_values('RR_Rank'))
     st.download_button(
@@ -805,11 +729,29 @@ if results:
         key="download_with_tier"
     )
 
-    # --- Kirim Email Otomatis untuk Sinyal A & B ---
-    df_AB = df[df['Tier'].str.contains('A|B')].copy()
-    if not df_AB.empty:
-        body = df_AB.to_html(index=False)
-        send_email_alert("Sinyal A & B Terdeteksi", body, "blackfoper@gmail.com")
-        st.success("Notifikasi email otomatis terkirim ke blackfoper@gmail.com untuk sinyal A & B.")
+    # --- Tabel pullback ---
+    pullback_tickers = []
+    for res in results:
+        data = res['Data']
+        has_fibo = data['FiboPullback'].notna().iloc[-1] if 'FiboPullback' in data.columns else False
+        has_ema = data['EMABounce'].notna().iloc[-1] if 'EMABounce' in data.columns else False
+        has_swlr = data['SwingLowReversal'].notna().iloc[-1] if 'SwingLowReversal' in data.columns else False
+        if has_fibo or has_ema or has_swlr:
+            pullback_tickers.append(res['Ticker'])
+
+    df_pullback = df[df['Ticker'].isin(pullback_tickers)]
+
+    if not df_pullback.empty:
+        st.subheader("Saham dengan Sinyal Pullback (Fibo/EMA/Swing Low Reversal)")
+        st.dataframe(df_pullback.sort_values('RR_Rank'))
+        st.download_button(
+            "Download Pullback ke CSV",
+            data=df_pullback.sort_values('RR_Rank').to_csv(index=False),
+            file_name="pullback.csv",
+            mime='text/csv',
+            key="download_pullback"
+        )
+    else:
+        st.info("Tidak ada saham pullback pada batch ini.")
 
 
