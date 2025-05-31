@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import smtplib
 from email.mime.text import MIMEText
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # Global untuk hasil
 results = []
@@ -561,16 +562,22 @@ batch_size = st.slider("Jumlah saham yang ingin di-scan:", min_value=20, max_val
 min_conditions = st.slider("Minimal jumlah kondisi untuk sinyal BUY:", min_value=1, max_value=9, value=5)
 selected_tickers = tickers[:batch_size]
 
+def fetch_and_analyze(ticker, min_conditions):
+    try:
+        return analyze_stock(ticker, min_conditions)
+    except Exception as e:
+        return None
+
+# Pada bagian batch processing:
 with st.spinner(f"Mengambil dan memproses data {batch_size} saham..."):
     results.clear()
     kondisi_table.clear()
-    for ticker in selected_tickers:
-        try:
-            res = analyze_stock(ticker, min_conditions)
+    with ThreadPoolExecutor(max_workers=8) as executor:  # Atur max_workers sesuai jumlah core/kecepatan internet
+        futures = [executor.submit(fetch_and_analyze, ticker, min_conditions) for ticker in selected_tickers]
+        for future in futures:
+            res = future.result()
             if res:
                 results.append(res)
-        except Exception as e:
-            st.write(f"Error proses {ticker}: {e}")
 
 # Tampilkan tabel kondisi dan tabel sinyal BUY di atas
 if kondisi_table:
