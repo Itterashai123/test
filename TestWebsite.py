@@ -824,7 +824,146 @@ if results:
     else:
         st.info("Tidak ada saham pullback pada batch ini.")
 
+def historical_backtest(tickers, min_conditions, n_signals=100):
+    """
+    Ambil 100 sinyal masa lalu (bukan hanya hari ini), hitung hit rate, average return, dan RR.
+    """
+    all_signals = []
+    for ticker in tickers:
+        data = get_stock_data(ticker)
+        if data.empty or len(data) < 60:
+            continue
 
+        # Hitung indikator
+        data['EMA20'] = data['Close'].ewm(span=20).mean()
+        data['EMA50'] = data['Close'].ewm(span=50).mean()
+        data['MACD'], data['Signal'] = calculate_macd(data)
+        data['RSI'] = calculate_rsi(data)
+        data['ATR'] = calculate_atr(data)
+        data['SMA50'] = data['Close'].rolling(window=50).mean()
+        data['ADX'] = calculate_adx(data)
+
+        for i in range(50, len(data)-10):  # Sisakan 10 hari ke depan untuk backtest
+            close_today = data['Close'].iloc[i]
+            sma50_today = data['SMA50'].iloc[i]
+            adx_today = data['ADX'].iloc[i]
+            ema_crossover = data['EMA20'].iloc[i] > data['EMA50'].iloc[i]
+            macd_cross = data['MACD'].iloc[i] > data['Signal'].iloc[i]
+            macd_positive = data['MACD'].iloc[i] > 0 and data['Signal'].iloc[i] > 0
+            rsi_ok = data['RSI'].iloc[i] < 60
+            trend_up = close_today > sma50_today if not pd.isna(sma50_today) else False
+            adx_ok = adx_today > 20
+
+            conditions = [
+                ema_crossover,
+                macd_cross,
+                macd_positive,
+                rsi_ok,
+                trend_up,
+                adx_ok
+            ]
+            total = sum(conditions)
+            if total >= min_conditions:
+                entry_price = close_today
+                atr = data['ATR'].iloc[i]
+                tp_sl = rekomendasi_tp_sl(entry_price, atr, data=data.iloc[:i+1])
+                bt = simple_backtest(data, i, entry_price, tp_sl["TP Final"], tp_sl["SL Final"], days_ahead=10)
+                all_signals.append({
+                    "Ticker": ticker,
+                    "Date": data.index[i],
+                    "Entry": entry_price,
+                    "RR": (tp_sl["TP Final"] - entry_price) / (entry_price - tp_sl["SL Final"]) if (entry_price - tp_sl["SL Final"]) != 0 else None,
+                    "Return_5d": bt["Return_5d"],
+                    "Return_10d": bt["Return_10d"],
+                    "Hit_TP": bt["Hit_TP"],
+                    "Hit_SL": bt["Hit_SL"]
+                })
+                if len(all_signals) >= n_signals:
+                    break
+        if len(all_signals) >= n_signals:
+            break
+
+    df_hist = pd.DataFrame(all_signals)
+    if not df_hist.empty:
+        hit_rate = df_hist["Hit_TP"].mean()
+        avg_return_5d = df_hist["Return_5d"].mean()
+        avg_return_10d = df_hist["Return_10d"].mean()
+        avg_rr = df_hist["RR"].mean()
+        st.subheader("Backtest 100 Sinyal Terakhir")
+        st.write(f"Hit Rate (kena TP): {hit_rate:.2%}")
+        st.write(f"Rata-rata Return 5 Hari: {avg_return_5d:.2f}%")
+        st.write(f"Rata-rata Return 10 Hari: {avg_return_10d:.2f}%")
+        st.write(f"Rata-rata Risk:Reward: {avg_rr:.2f}")
+        st.dataframe(df_hist)
+    else:
+        st.info("Tidak cukup sinyal historis untuk backtest.")
+
+def evaluate_yesterday_AB(tickers, min_conditions):
+    """
+    Evaluasi performa saham Tier A/B dari hari kemarin.
+    """
+    import datetime
+    yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).date()
+    ab_results = []
+    for ticker in tickers:
+        data = get_stock_data(ticker)
+        if data.empty or len(data) < 60:
+            continue
+        data['EMA20'] = data['Close'].ewm(span=20).mean()
+        data['EMA50'] = data['Close'].ewm(span=50).mean()
+        data['MACD'], data['Signal'] = calculate_macd(data)
+        data['RSI'] = calculate_rsi(data)
+        data['ATR'] = calculate_atr(data)
+        data['SMA50'] = data['Close'].rolling(window=50).mean()
+        data['ADX'] = calculate_adx(data)
+
+        # Cek sinyal kemarin
+        if yesterday not in data.index:
+            continue
+        i = data.index.get_loc(yesterday)
+        close_today = data['Close'].iloc[i]
+        sma50_today = data['SMA50'].iloc[i]
+        adx_today = data['ADX'].iloc[i]
+        ema_crossover = data['EMA20'].iloc[i] > data['EMA50'].iloc[i]
+        macd_cross = data['MACD'].iloc[i] > data['Signal'].iloc[i]
+        macd_positive = data['MACD'].iloc[i] > 0 and data['Signal'].iloc[i] > 0
+        rsi_ok = data['RSI'].iloc[i] < 60
+        trend_up = close_today > sma50_today if not pd.isna(sma50_today) else False
+        adx_ok = adx_today > 20
+
+        conditions = [
+            ema_crossover,
+            macd_cross,
+            macd_positive,
+            rsi_ok,
+            trend_up,
+            adx_ok
+        ]
+        total = sum(conditions)
+        if total >= min_conditions:
+            entry_price = close_today
+            if i+1 < len(data):
+                next_close = data['Close'].iloc[i+1]
+                gain = (next_close - entry_price) / entry_price * 100
+            else:
+                gain = None
+            ab_results.append({
+                "Ticker": ticker,
+                "Entry Date": yesterday,
+                "Entry": entry_price,
+                "Next Day Close": next_close if i+1 < len(data) else None,
+                "Gain (%)": gain
+            })
+    df_ab = pd.DataFrame(ab_results)
+    if not df_ab.empty:
+        st.subheader("Evaluasi Saham Tier A/B Kemarin")
+        st.dataframe(df_ab)
+        st.write(f"Rata-rata gain 1 hari: {df_ab['Gain (%)'].mean():.2f}%")
+    else:
+        st.info("Tidak ada saham Tier A/B kemarin atau data tidak cukup.")
+
+if st.button("Evaluasi Saham A/B Kemarin"):
+    evaluate_yesterday_AB(tickers, min_conditions)
 
 
 
