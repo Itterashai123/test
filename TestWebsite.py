@@ -257,6 +257,9 @@ def analyze_stock(ticker, min_conditions, min_atr=10.0):
         (data['Volume'].iloc[i-1] > data['Volume'].iloc[i-2])
     )
 
+    # Tambahkan filter moving average crossover
+    ema_crossover = data['EMA20'].iloc[-1] > data['EMA50'].iloc[-1]
+
     # Tambahkan ke daftar kondisi
     conditions = [
         breakout,           # 1
