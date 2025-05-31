@@ -674,6 +674,12 @@ if results:
     else:
         st.info("Tidak ada sinyal BUY hari ini di batch ini.")
 
+    if selected_ticker:
+        st.markdown("### Berita Kontan Terbaru")
+        berita_kontan = get_berita_kontan(selected_ticker)
+        for judul, link, waktu in berita_kontan:
+            st.markdown(f"- [{judul}]({link}) <sub>{waktu}</sub>", unsafe_allow_html=True)
+
 def send_email_alert(subject, body, to_email):
     # Ganti dengan email dan app password Anda
     from_email = "testsaham7@gmail.com"
