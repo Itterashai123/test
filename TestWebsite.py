@@ -8,6 +8,7 @@ import requests
 from bs4 import BeautifulSoup
 import smtplib
 from email.mime.text import MIMEText
+import datetime
 
 # Global untuk hasil
 results = []
@@ -624,6 +625,23 @@ if results:
     else:
         st.info("Tidak ada sinyal BUY hari ini di batch ini.")
 
+def send_email_alert(subject, body, to_email):
+    # Ganti dengan email dan app password Anda
+    from_email = "testsaham7@gmail.com"
+    app_password = "fngk bziv sqxo lxxv"  # Gunakan App Password, bukan password biasa
+
+    msg = MIMEText(body, 'html')
+    msg['Subject'] = subject
+    msg['From'] = from_email
+    msg['To'] = to_email
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(from_email, app_password)
+            server.sendmail(from_email, [to_email], msg.as_string())
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
 def assign_detailed_tier_v2(row):
     conds = {
         'Breakout': row.get('Breakout', False),
@@ -713,10 +731,13 @@ if results:
 
     # --- Kirim Email Otomatis untuk Sinyal A & B ---
     df_AB = df[df['Tier'].str.contains('A|B')].copy()
-    if not df_AB.empty:
+    now = datetime.datetime.now()
+    if not df_AB.empty and (now.hour in [8, 17] and now.minute == 0):
         body = df_AB.to_html(index=False)
         send_email_alert("Sinyal A & B Terdeteksi", body, "blackfoper@gmail.com")
         st.success("Notifikasi email otomatis terkirim ke blackfoper@gmail.com untuk sinyal A & B.")
+    elif not df_AB.empty:
+        st.info("Sinyal A & B terdeteksi, namun email hanya dikirim otomatis pada pukul 08:00 dan 17:00.")
 
     # --- Tabel utama ---
     st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
@@ -753,5 +774,7 @@ if results:
         )
     else:
         st.info("Tidak ada saham pullback pada batch ini.")
+
+
 
 
