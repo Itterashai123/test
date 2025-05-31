@@ -312,6 +312,7 @@ def find_swing_high_low(data, window=20):
     data['SwingLow'] = data['Low'][(data['Low'] == data['Low'].rolling(window=window, center=True).min())]
     return data
 
+@st.cache_data(ttl=3600)
 def detect_swing_signals(data):
     data = find_swing_high_low(data)
     buy_signals = []
@@ -350,6 +351,7 @@ def detect_swing_signals(data):
     data['SellSignal'] = [None]*20 + sell_signals
     return data
 
+@st.cache_data(ttl=3600)
 def detect_ema_bounce(data):
     data['EMA20'] = data['Close'].ewm(span=20).mean()
     data['EMA50'] = data['Close'].ewm(span=50).mean()
@@ -373,6 +375,43 @@ def detect_ema_bounce(data):
             bounce_signals.append(None)
 
     data['EMABounce'] = [None] + bounce_signals  # Pad the first row
+    return data
+
+@st.cache_data(ttl=3600)
+def detect_fibonacci_pullback(data, lookback=30):
+    signals = []
+    for i in range(lookback, len(data)):
+        swing_high = data['High'].iloc[i-lookback:i].max()
+        swing_low = data['Low'].iloc[i-lookback:i].min()
+        fib_382 = swing_high - 0.382 * (swing_high - swing_low)
+        fib_618 = swing_high - 0.618 * (swing_high - swing_low)
+
+        close = data['Close'].iloc[i]
+        open_ = data['Open'].iloc[i]
+        is_bullish = close > open_ and (close - open_) > 0.5 * (data['High'].iloc[i] - data['Low'].iloc[i])
+
+        if fib_618 < close < fib_382 and is_bullish:
+            signals.append(data.index[i])
+        else:
+            signals.append(None)
+    data['FiboPullback'] = [None] * lookback + signals
+    return data
+
+@st.cache_data(ttl=3600)
+def detect_swing_low_reversal(data):
+    swing_lows = []
+    for i in range(2, len(data) - 2):
+        if data['Low'].iloc[i] < data['Low'].iloc[i-2] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i-1] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i+1] and \
+           data['Low'].iloc[i] < data['Low'].iloc[i+2]:
+            close = data['Close'].iloc[i+1]
+            open_ = data['Open'].iloc[i+1]
+            is_bullish = close > open_ and (close - open_) > 0.5 * (data['High'].iloc[i+1] - data['Low'].iloc[i+1])
+            swing_lows.append(data.index[i+1] if is_bullish else None)
+        else:
+            swing_lows.append(None)
+    data['SwingLowReversal'] = [None]*2 + swing_lows + [None]*2
     return data
 
 def rekomendasi_tp_sl(entry_price, atr, data=None, tp_atr=2, sl_atr=1, tp_pct=0.05, sl_pct=0.03):
