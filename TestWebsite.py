@@ -117,6 +117,13 @@ def get_stock_data(ticker):
         data = data[ticker]  # Ambil kolom level kedua: 'Open', 'High', dst
     return data
 
+def get_stock_data_cached(ticker):
+    if 'stock_data' not in st.session_state:
+        st.session_state['stock_data'] = {}
+    if ticker not in st.session_state['stock_data']:
+        st.session_state['stock_data'][ticker] = yf.download(ticker, period='1y', interval='1d', group_by=None)
+    return st.session_state['stock_data'][ticker]
+
 def check_data_coverage(data, ticker):
     if data.empty:
         st.write(f"{ticker}: ❌ Data kosong.")
@@ -533,7 +540,7 @@ def simple_backtest(data, entry_idx, entry_price, tp, sl, days_ahead=10):
 st.title("Sinyal Trading Semi-Otomatis IDX Full Scan")
 
 st.markdown("""
-Scan seluruh saham IDX dan tampilkan sinyal BUY yang memenuhi minimal 5 dari 9 kondisi berikut:
+Scan seluruh saham IDX dan tampilkan sinyal BUY yang memenuhi minimal 5 dari 10 kondisi berikut:
 1. **Breakout resistance 50 hari +1%** (validasi 2 hari berturut-turut close di atas resistance)
 2. **Candle bullish signifikan** (close > mid-range & body > 50% candle)
 3. **Volume naik >1.5x rata-rata 5 hari**
@@ -543,6 +550,7 @@ Scan seluruh saham IDX dan tampilkan sinyal BUY yang memenuhi minimal 5 dari 9 k
 7. **Harga di atas SMA50**
 8. **ADX > 20** (trend kuat)
 9. **Volume naik 2 hari berturut-turut** (konfirmasi akumulasi)
+10. **EMA20 > EMA50** (tambahan)
 """)
 
 if st.button("Reset Cache"):
@@ -808,7 +816,7 @@ if results:
             data = data_row['Data']
             last_atr = data['ATR'].iloc[-1]
             tp_sl = rekomendasi_tp_sl(entry, last_atr, data=data)
-            rr_atr = (tp_sl["TP (ATR)"] - entry) / (entry - tp_sl["SL (ATR)"]) if (entry - tp_sl["SL (ATR)"]) != 0 else None
+            rr_atr = (tp_sl["TP Final"] - entry) / (entry - tp_sl["SL Final"]) if (entry - tp_sl["SL Final"]) != 0 else None
             tp_final_list.append(tp_sl["TP Final"])
             sl_final_list.append(tp_sl["SL Final"])
         else:
@@ -1009,6 +1017,16 @@ def evaluate_yesterday_AB(tickers, min_conditions):
 
 if st.button("Evaluasi Saham A/B Kemarin"):
     evaluate_yesterday_AB(tickers, min_conditions)
+
+def add_all_indicators(data):
+    data['EMA20'] = data['Close'].ewm(span=20).mean()
+    data['EMA50'] = data['Close'].ewm(span=50).mean()
+    data['MACD'], data['Signal'] = calculate_macd(data)
+    data['RSI'] = calculate_rsi(data)
+    data['ATR'] = calculate_atr(data)
+    data['SMA50'] = data['Close'].rolling(window=50).mean()
+    data['ADX'] = calculate_adx(data)
+    return data
 
 
 
