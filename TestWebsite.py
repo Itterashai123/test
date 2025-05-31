@@ -173,6 +173,9 @@ def analyze_stock(ticker, min_conditions, min_atr=10.0):
     upper_band, middle_band, lower_band = calculate_bollinger_bands(data)
     atr = calculate_atr(data)
     adx = calculate_adx(data)
+    # Tambahan: EMA20 & EMA50
+    data['EMA20'] = data['Close'].ewm(span=20).mean()
+    data['EMA50'] = data['Close'].ewm(span=50).mean()
 
     data['MACD'] = macd
     data['Signal'] = signal
@@ -264,9 +267,11 @@ def analyze_stock(ticker, min_conditions, min_atr=10.0):
         rsi_ok,             # 6
         trend_up,           # 7
         adx_ok,             # 8
-        volume_up_2days     # 9
+        volume_up_2days,    # 9
+        ema_crossover       # 10 (tambahan)
     ]
-    # Jika ingin volume_up_2days opsional, jangan tambahkan ke condition_names
+    # Tambahkan nama kondisi baru
+    condition_names.append("EMA20 > EMA50")
 
     total_conditions = sum(conditions)
     kondisi_table.append({
@@ -291,6 +296,7 @@ def analyze_stock(ticker, min_conditions, min_atr=10.0):
             'MACD Cross': macd_cross,
             'RSI': rsi_today,
             'Trend Up': trend_up,
+            'EMA Crossover': ema_crossover,  # Tambahan
             'Resistance': resistance,
             'SMA50': sma50_today,
             'Data': data
@@ -460,6 +466,26 @@ def detect_swing_low_reversal(data):
     data['SwingLowReversal'] = [None]*2 + swing_lows + [None]*2
     return data
 
+def simple_backtest(data, entry_idx, entry_price, tp, sl, days_ahead=10):
+    """
+    Simulasi backtest sederhana: cek return 5/10 hari ke depan dan apakah TP/SL tercapai.
+    """
+    result = {"Return_5d": None, "Return_10d": None, "Hit_TP": False, "Hit_SL": False}
+    future_prices = data['Close'].iloc[entry_idx+1:entry_idx+1+days_ahead]
+    if len(future_prices) >= 5:
+        result["Return_5d"] = (future_prices.iloc[4] - entry_price) / entry_price * 100
+    if len(future_prices) >= 10:
+        result["Return_10d"] = (future_prices.iloc[9] - entry_price) / entry_price * 100
+    # Cek apakah TP/SL tercapai dalam 10 hari ke depan
+    for price in future_prices:
+        if price >= tp:
+            result["Hit_TP"] = True
+            break
+        if price <= sl:
+            result["Hit_SL"] = True
+            break
+    return result
+
 
 # UI
 st.title("Sinyal Trading Semi-Otomatis IDX Full Scan")
@@ -505,6 +531,26 @@ else:
 
 if results:
     df = pd.DataFrame(results).drop(columns=['Data'])
+
+    # Simulasi backtest untuk setiap sinyal
+    backtest_results = []
+    for idx, row in df.iterrows():
+        data_row = next((item for item in results if item['Ticker'] == row['Ticker']), None)
+        if data_row:
+            data = data_row['Data']
+            entry_idx = data.index.get_loc(row['Date'])
+            tp_sl = rekomendasi_tp_sl(row['Close'], data['ATR'].iloc[entry_idx], data=data)
+            bt = simple_backtest(data, entry_idx, row['Close'], tp_sl["TP Final"], tp_sl["SL Final"], days_ahead=10)
+            backtest_results.append(bt)
+        else:
+            backtest_results.append({"Return_5d": None, "Return_10d": None, "Hit_TP": None, "Hit_SL": None})
+
+    # Gabungkan hasil backtest ke DataFrame
+    df["Return_5d"] = [bt["Return_5d"] for bt in backtest_results]
+    df["Return_10d"] = [bt["Return_10d"] for bt in backtest_results]
+    df["Hit_TP"] = [bt["Hit_TP"] for bt in backtest_results]
+    df["Hit_SL"] = [bt["Hit_SL"] for bt in backtest_results]
+
     st.subheader(f"Sinyal BUY ditemukan ({len(results)} saham)")
     st.dataframe(df)
 
@@ -774,6 +820,7 @@ if results:
         )
     else:
         st.info("Tidak ada saham pullback pada batch ini.")
+
 
 
 
