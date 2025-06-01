@@ -22,8 +22,9 @@ condition_names = [
     "MACD Positive",
     "RSI < 60",
     "Trend Up",
-    "ADX > 20",           # Kondisi ke-8
-    "Volume 2 Hari Naik"  # Kondisi ke-9
+    "ADX > 20",
+    "Volume 2 Hari Naik",
+    "EMA20 > EMA50"  # Tambahkan di sini, hapus append di analyze_stock
 ]
 
     
@@ -172,7 +173,7 @@ def calculate_adx(data, window=14):
     return adx
 
 def analyze_stock(ticker, min_conditions, min_atr=10.0):
-    data = get_stock_data(ticker)
+    data = get_stock_data_cached(ticker)
     if data.empty or len(data) < 50:
         return None
 
@@ -281,8 +282,7 @@ def analyze_stock(ticker, min_conditions, min_atr=10.0):
         volume_up_2days,    # 9
         ema_crossover       # 10 (tambahan)
     ]
-    # Tambahkan nama kondisi baru
-    condition_names.append("EMA20 > EMA50")
+    # HAPUS baris: condition_names.append("EMA20 > EMA50")
 
     total_conditions = sum(conditions)
     kondisi_table.append({
@@ -564,9 +564,29 @@ selected_tickers = tickers[:batch_size]
 
 def fetch_and_analyze(ticker, min_conditions):
     try:
+        if not fundamental_filter(ticker):
+            return None
         return analyze_stock(ticker, min_conditions)
     except Exception as e:
         return None
+
+def get_fundamental_info(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        return {
+            "Nama": info.get("shortName"),
+            "Market Cap": info.get("marketCap"),
+            "PER": info.get("trailingPE"),
+            "PBV": info.get("priceToBook"),
+            "ROE": info.get("returnOnEquity"),
+            "EPS": info.get("trailingEps"),
+            "Div Yield": info.get("dividendYield"),
+            "Sector": info.get("sector"),
+            "Industry": info.get("industry"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # Pada bagian batch processing:
 with st.spinner(f"Mengambil dan memproses data {batch_size} saham..."):
@@ -622,6 +642,11 @@ if results:
     if selected_row:
         selected_data = selected_row['Data']
         selected_resistance = selected_row['Resistance']
+
+        # --- Tambahkan Fundamental di atas chart ---
+        st.markdown("### Data Fundamental")
+        fundamental = get_fundamental_info(selected_ticker)
+        st.write(fundamental)
 
         # Grafik Harga dengan Sinyal Swing (harian)
         selected_data = detect_swing_signals(selected_data)
@@ -1034,6 +1059,40 @@ def add_all_indicators(data):
     data['SMA50'] = data['Close'].rolling(window=50).mean()
     data['ADX'] = calculate_adx(data)
     return data
+
+
+def fundamental_filter(ticker, per_max=20, pbv_max=3, roe_min=0.1, mc_min=1e12):
+    """
+    Filter fundamental: hanya lolos jika memenuhi semua kriteria.
+    - per_max: Maksimum PER
+    - pbv_max: Maksimum PBV
+    - roe_min: Minimum ROE (dalam desimal, misal 0.1 = 10%)
+    - mc_min: Minimum Market Cap (default 1T)
+    """
+    info = get_fundamental_info(ticker)
+    try:
+        if info.get("PER") is None or info.get("PBV") is None or info.get("ROE") is None or info.get("Market Cap") is None:
+            return False
+        if info["PER"] > per_max:
+            return False
+        if info["PBV"] > pbv_max:
+            return False
+        if info["ROE"] < roe_min:
+            return False
+        if info["Market Cap"] < mc_min:
+            return False
+        return True
+    except Exception:
+        return False
+
+# --- MODIFIKASI fetch_and_analyze agar hanya memproses saham yang lolos fundamental ---
+def fetch_and_analyze(ticker, min_conditions):
+    try:
+        if not fundamental_filter(ticker):
+            return None
+        return analyze_stock(ticker, min_conditions)
+    except Exception as e:
+        return None
 
 
 
